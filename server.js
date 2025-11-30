@@ -1,97 +1,91 @@
-require("dotenv").config();
-const express = require("express");
-const cors = require("cors");
-const axios = require("axios");
+import axios from "axios";
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+export default async function handler(req, res) {
+  const { city } = req.query;
+  const apiKey = process.env.CWA_API_KEY;
 
-const CWA_API_BASE_URL = "https://opendata.cwa.gov.tw/api";
-const CWA_API_KEY = process.env.CWA_API_KEY;
+  if (!city) {
+    return res.status(400).json({
+      success: false,
+      error: "缺少 city 參數",
+    });
+  }
 
-app.use(cors());
-app.use(express.json());
-
-// 🌤 縣市英文對照（因不同 API 有 cityName vs locationName）
-const CITY_MAP = {
-  臺北市: "Taipei",
-  新北市: "NewTaipei",
-  桃園市: "Taoyuan",
-  臺中市: "Taichung",
-  臺南市: "Tainan",
-  高雄市: "Kaohsiung",
-  基隆市: "Keelung",
-  新竹市: "Hsinchu",
-  嘉義市: "Chiayi",
-};
-
-// 👉 主 API：一次返回「未來 1 週」＋「24 小時」
-app.get("/api/weather", async (req, res) => {
   try {
-    if (!CWA_API_KEY) {
-      return res.status(500).json({
-        error: "伺服器未設定 CWA_API_KEY",
+    // ============================
+    // A. 未來一週：F-D0047-091
+    // ============================
+    const weekUrl = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-D0047-091";
+
+    const weekRes = await axios.get(weekUrl, {
+      params: {
+        Authorization: apiKey,
+        locationName: city,
+      },
+    });
+
+    const weekRecords = weekRes.data?.records?.locations?.[0]?.location?.[0];
+
+    if (!weekRecords) {
+      return res.json({
+        success: false,
+        error: `F-D0047-091 找不到縣市：${city}`,
+        raw: weekRes.data,
       });
     }
 
-    const city = req.query.city || "臺北市";
-    const cityEng = CITY_MAP[city] || "Taipei";
+    const weekElements = weekRecords.weatherElement;
 
-    // API URLs
-    const weekURL = `${CWA_API_BASE_URL}/v1/rest/datastore/F-D0047-091`;
-    const dailyURL = `${CWA_API_BASE_URL}/v1/rest/datastore/F-A0085-005`;
-
-    // 🌤 同時呼叫 API（加速）
-    const [weekRes, dailyRes] = await Promise.all([
-      axios.get(weekURL, {
-        params: { Authorization: CWA_API_KEY, locationName: city },
-      }),
-      axios.get(dailyURL, {
-        params: { Authorization: CWA_API_KEY, locationName: cityEng },
-      }),
-    ]);
-
-    // --- 處理一週天氣 ---
-    const weekLocation = weekRes.data.records.locations[0].location[0];
-    const weekData = weekLocation.weatherElement.map((el) => ({
+    const weeklyForecast = weekElements.map((el) => ({
       elementName: el.elementName,
       description: el.description,
-      time: el.time,
+      time: el.time, // 內含 7 日資料
     }));
 
-    // --- 處理 24 小時天氣 ---
-    const dailyLocation = dailyRes.data.records.locations[0].location[0];
-    const dailyData = dailyLocation.weatherElement.map((el) => ({
+    // ============================
+    // B. 未來 24 小時：F-A0085-005
+    // ============================
+    const dayUrl = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-A0085-005";
+
+    const dayRes = await axios.get(dayUrl, {
+      params: {
+        Authorization: apiKey,
+        locationName: city,
+      },
+    });
+
+    const dayRecords = dayRes.data?.records?.location?.[0];
+
+    if (!dayRecords) {
+      return res.json({
+        success: false,
+        error: `F-A0085-005 找不到縣市：${city}`,
+        raw: dayRes.data,
+      });
+    }
+
+    const dayElements = dayRecords.weatherElement;
+
+    const hourlyForecast = dayElements.map((el) => ({
       elementName: el.elementName,
       description: el.description,
-      time: el.time,
+      time: el.time, // 內含未來 24 小時 (3小時一筆)
     }));
 
-    res.json({
+    // ============================
+    // 輸出結果整合
+    // ============================
+    return res.json({
       success: true,
       city,
-      cityEng,
-      weekly: weekData,
-      hourly24: dailyData,
+      weekly: weeklyForecast,
+      hourly: hourlyForecast,
     });
 
-  } catch (err) {
-    console.error("❌ 天氣 API 呼叫失敗", err.message);
-    res.status(500).json({
+  } catch (error) {
+    return res.status(500).json({
       success: false,
-      error: "無法取得天氣資料",
-      details: err.message,
+      error: error.message,
     });
   }
-});
-
-app.get("/", (req, res) => {
-  res.json({
-    message: "CWA Weather API Ready",
-    example: "/api/weather?city=臺北市",
-  });
-});
-
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+}
