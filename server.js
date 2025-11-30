@@ -1,5 +1,3 @@
-// server.js with updated CWA API calls (F-D0047-091 and F-A0085-005) - Dynamic Location
-
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
@@ -10,16 +8,21 @@ const PORT = process.env.PORT || 3000;
 
 // CWA API 設定
 const CWA_API_BASE_URL = "https://opendata.cwa.gov.tw/api";
-// 氣象署 API 金鑰，從 .env 檔案讀取
 const CWA_API_KEY = process.env.CWA_API_KEY;
 
-// 台灣所有縣市/縣市列表 (F-D0047-091 & F-A0085-005 支援的縣市名稱)
+// 台灣縣市列表
 const TAIWAN_LOCATIONS = [
-    "宜蘭縣", "花蓮縣", "臺東縣", "澎湖縣", "金門縣", "連江縣",
-    "臺北市", "新北市", "桃園市", "臺中市", "臺南市", "高雄市",
-    "基隆市", "新竹縣", "新竹市", "苗栗縣", "彰化縣", "南投縣",
-    "雲林縣", "嘉義縣", "嘉義市", "屏東縣"
+  "宜蘭縣","花蓮縣","臺東縣","澎湖縣","金門縣","連江縣",
+  "臺北市","新北市","桃園市","臺中市","臺南市","高雄市",
+  "基隆市","新竹縣","新竹市","苗栗縣","彰化縣","南投縣",
+  "雲林縣","嘉義縣","嘉義市","屏東縣"
 ];
+
+// ⭐️ CWA API 地名映射表 (解決 新竹市/嘉義市 的問題)
+const CWA_NAME_MAP = {
+    "新竹市": "新竹縣",
+    "嘉義市": "嘉義縣",
+};
 
 // Middleware
 app.use(cors());
@@ -27,196 +30,179 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 /**
- * 輔助函式：呼叫 CWA API
- * @param {string} datasetId - 氣象資料集代碼 (e.g., F-D0047-091)
- * @param {Object} params - 查詢參數 (e.g., locationName, elements)
+ * 統一的 CWA API 請求函數 (從您成功的代碼中提取)
  */
-const fetchCwaData = async (datasetId, params = {}) => {
-  if (!CWA_API_KEY) {
-    throw new Error("伺服器設定錯誤: 請在 .env 檔案中設定 CWA_API_KEY");
-  }
+const fetchCwaData = async (locationName) => {
+  if (!CWA_API_KEY) {
+    throw new Error("請在 .env 檔案中設定 CWA_API_KEY");
+  }
 
-  const url = `${CWA_API_BASE_URL}/v1/rest/datastore/${datasetId}`;
-  
-  // 設置預設參數，並覆寫授權碼
-  const apiParams = {
-    Authorization: CWA_API_KEY,
-    ...params
-  };
-
-  const response = await axios.get(url, { params: apiParams });
-  return response.data;
+  // 使用 F-C0032-001 (36小時預報)
+  const response = await axios.get(
+    `${CWA_API_BASE_URL}/v1/rest/datastore/F-C0032-001`,
+    {
+      params: {
+        Authorization: CWA_API_KEY,
+        locationName: locationName, // 傳入動態的縣市名稱
+      },
+    }
+  );
+  return response.data;
 };
+
 
 /**
- * 取得指定縣市的綜合天氣資訊 (使用 F-D0047-091 和 F-A0085-005)
- * 透過 req.query.locationName 接收縣市名稱。
- *
- * @param {express.Request} req 
- * @param {express.Response} res 
+ * 取得指定縣市的天氣預報 (通用化函數)
+ * 使用 F-C0032-001 資料集
  */
-const getCombinedWeather = async (req, res) => {
-  try {
-    const locationName = req.query.locationName;
+const getGeneralWeather = async (req, res) => {
+  try {
+    const requestedLocationName = req.query.locationName;
+    if (!requestedLocationName) {
+      return res.status(400).json({ error: "缺少參數", message: "請提供 locationName" });
+    }
 
-    // 1. 參數檢查
-    if (!locationName) {
-        return res.status(400).json({
-            error: "缺少參數",
-            message: "請提供 locationName 查詢參數。",
-        });
-    }
-    if (!TAIWAN_LOCATIONS.includes(locationName)) {
-        return res.status(400).json({
-            error: "地點無效",
-            message: `地點 ${locationName} 不在支援列表中。`,
-        });
-    }
+    // 處理地名映射 (例如新竹市 => 新竹縣)
+    const apiLocationName = CWA_NAME_MAP[requestedLocationName] || requestedLocationName;
 
-    if (!CWA_API_KEY) {
-      return res.status(500).json({
-        error: "伺服器設定錯誤",
-        message: "請在 .env 檔案中設定 CWA_API_KEY",
-      });
-    }
+    // 呼叫 CWA API
+    const data = await fetchCwaData(apiLocationName);
 
-    // 2. 同時發送兩個 API 請求
-    const twoWeekForecastPromise = fetchCwaData('F-D0047-091', {
-      locationName: locationName,
-      // 請求氣溫(T)和天氣現象(Wx)
-      elementName: "T,Wx", 
-    });
-
-    // 紫外線指數 F-A0085-005 的 locationName 參數通常無效，故不帶
-    const uvIndexPromise = fetchCwaData('F-A0085-005');
-    
-    const [twoWeekForecastData, uvIndexData] = await Promise.all([
-      twoWeekForecastPromise,
-      uvIndexPromise
-    ]);
-    
-    // --- 3. 整理 F-D0047-091 (兩週預報) 資料 ---
-    
-    const targetLocation = twoWeekForecastData.records.locations[0].location.find(
-      loc => loc.locationName === locationName
+    // 找到目標縣市的資料
+    const locationData = data.records.location.find(
+        loc => loc.locationName === apiLocationName
     );
-    
-    let forecasts = [];
-    let twoWeekDescription = twoWeekForecastData.records.locations[0].datasetDescription;
-    
-    if (targetLocation && targetLocation.weatherElement.length > 0) {
-        const tempElement = targetLocation.weatherElement.find(e => e.elementName === 'T');
-        const wxElement = targetLocation.weatherElement.find(e => e.elementName === 'Wx');
-        
-        if (tempElement) {
-            // 僅取前 5 個預報時段
-            forecasts = tempElement.time.slice(0, 5).map(timeSlot => {
-                const weatherAtTime = wxElement ? wxElement.time.find(t => t.startTime === timeSlot.startTime) : null;
-                
-                return {
-                    startTime: timeSlot.startTime,
-                    endTime: timeSlot.endTime,
-                    // 氣溫
-                    temperature: timeSlot.elementValue.value + "°C",
-                    // 天氣現象
-                    weatherDescription: weatherAtTime ? weatherAtTime.elementValue[0].value : 'N/A'
-                };
-            });
-        }
-    }
-    
-    // --- 4. 整理 F-A0085-005 (紫外線) 資料 ---
-    
-    let currentUV = 'N/A';
-    let uvDescription = uvIndexData.records.datasetDescription;
-    
-    if (uvIndexData.records.locations.length > 0) {
-        // F-A0085-005 的 locationName 直接對應縣市名稱
-        const uvLocation = uvIndexData.records.locations[0].location.find(
-            loc => loc.locationName === locationName
-        );
-        if (uvLocation && uvLocation.weatherElement[0] && uvLocation.weatherElement[0].elementValue.value) {
-            currentUV = uvLocation.weatherElement[0].elementValue.value;
-        }
-    }
 
-    // 5. 回傳整合後的資料
-    res.json({
-      success: true,
-      data: {
-        city: locationName, // 動態縣市名稱
-        updateTime: twoWeekDescription,
-        uvDescription: uvDescription,
-        currentUVIndex: currentUV, 
-        forecasts: forecasts, 
-      },
-    });
-    
-  } catch (error) {
-    console.error("取得天氣資料失敗:", error.message);
+    if (!locationData) {
+      return res.status(404).json({
+        error: "查無資料",
+        message: `無法取得 ${apiLocationName} 的天氣資料`,
+      });
+    }
 
-    if (error.response) {
-      // API 回應錯誤 (例如授權碼錯誤、參數錯誤)
-      const errorMsg = error.response.data.message || "無法取得天氣資料";
-      return res.status(error.response.status).json({
-        error: "CWA API 錯誤",
-        message: errorMsg,
-        details: error.response.data,
-      });
-    }
+    // 整理天氣資料
+    const weatherData = {
+      city: requestedLocationName, // 回傳用戶查詢的名稱
+      updateTime: data.records.datasetDescription,
+      currentWeather: { temperature: 'N/A°C', weatherDescription: 'N/A' }, // 初始化
+      forecasts: [],
+    };
 
-    // 其他錯誤
-    res.status(500).json({
-      error: "伺服器錯誤",
-      message: error.message || "無法取得天氣資料，請稍後再試",
-    });
-  }
+    // 解析天氣要素
+    const weatherElements = locationData.weatherElement;
+    const timeCount = weatherElements[0].time.length;
+
+    for (let i = 0; i < timeCount; i++) {
+      const forecast = {
+        startTime: weatherElements[0].time[i].startTime,
+        endTime: weatherElements[0].time[i].endTime,
+        // ⭐️ 將所有預報元素解析到 forecast 物件
+        weather: "", 
+        rain: "",
+        minTemp: "",
+        maxTemp: "",
+        // ... 其他元素
+      };
+
+      weatherElements.forEach((element) => {
+        const value = element.time[i].parameter;
+        switch (element.elementName) {
+          case "Wx":
+            forecast.weather = value.parameterName;
+            break;
+          case "PoP":
+            forecast.rain = value.parameterName + "%";
+            break;
+          case "MinT":
+            forecast.minTemp = value.parameterName + "°C";
+            break;
+          case "MaxT":
+            forecast.maxTemp = value.parameterName + "°C";
+            break;
+          case "CI":
+            forecast.comfort = value.parameterName;
+            break;
+          // ... 省略其他元素，如果需要請自行添加
+        }
+      });
+      
+      // ⭐️ 如果是第一個預報時段，提取為當前天氣估算
+      if (i === 0) {
+          const avgT = (parseInt(forecast.minTemp) + parseInt(forecast.maxTemp)) / 2;
+          weatherData.currentWeather = {
+              temperature: `${Math.round(avgT)}°C`,
+              weatherDescription: forecast.weather
+          };
+      }
+
+      weatherData.forecasts.push(forecast);
+    }
+
+    res.json({
+      success: true,
+      data: weatherData,
+    });
+  } catch (error) {
+    console.error("取得天氣資料失敗:", error.message);
+
+    if (error.response) {
+      // API 回應錯誤
+      return res.status(error.response.status).json({
+        error: "CWA API 錯誤",
+        message: error.response.data.message || "無法取得天氣資料",
+        details: error.response.data,
+      });
+    }
+
+    // 其他錯誤
+    res.status(500).json({
+      error: "伺服器錯誤",
+      message: error.message || "無法取得天氣資料，請稍後再試",
+    });
+  }
 };
+
 
 // Routes
 app.get("/", (req, res) => {
-  res.json({
-    message: "歡迎使用 CWA 天氣預報 API (支援動態縣市查詢)",
-    endpoints: {
-      weather: "/api/weather?locationName={縣市名稱}", 
-      locations: "/api/locations",
-      health: "/api/health",
-    },
-  });
+  res.json({
+    message: "CWA 天氣預報 API",
+    endpoints: {
+      weather: "/api/weather?locationName={縣市名稱}", // ⭐️ 新增通用路徑
+      health: "/api/health",
+      locations: "/api/locations"
+    },
+  });
 });
 
 app.get("/api/health", (req, res) => {
-  res.json({ status: "OK", timestamp: new Date().toISOString() });
+  res.json({ status: "OK", timestamp: new Date().toISOString() });
 });
 
-// 新增縣市列表 API
-app.get("/api/locations", (req, res) => {
-    res.json({
-        success: true,
-        data: TAIWAN_LOCATIONS,
-    });
-});
+// ⭐️ 新增/api/locations 供前端下拉選單使用
+app.get("/api/locations", (req, res) => res.json({ success: true, data: TAIWAN_LOCATIONS }));
 
-// 取得指定縣市綜合天氣預報
-app.get("/api/weather", getCombinedWeather);
+// ⭐️ 新增通用天氣預報端點
+app.get("/api/weather", getGeneralWeather);
+
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({
-    error: "伺服器錯誤",
-    message: err.message,
-  });
+  console.error(err.stack);
+  res.status(500).json({
+    error: "伺服器錯誤",
+    message: err.message,
+  });
 });
 
 // 404 handler
 app.use((req, res) => {
-  res.status(404).json({
-    error: "找不到此路徑",
-  });
+  res.status(404).json({
+    error: "找不到此路徑",
+  });
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 伺服器運行已運作`);
-  console.log(`📍 環境: ${process.env.NODE_ENV || "development"}`);
+  console.log(`🚀 伺服器運行已運作 on port ${PORT}`);
+  console.log(`📍 環境: ${process.env.NODE_ENV || "development"}`);
 });
